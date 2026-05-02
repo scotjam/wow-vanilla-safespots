@@ -248,13 +248,15 @@ WIZARD_STEPS = [
      "Click '🚀 Launch WoW'. The game starts through the tool so it can access memory."),
     ("Move & Orient",
      "Log in, walk to a new position and turn to face a new direction.\n"
-     "This gives the scanner a known coordinate to search for."),
+     "⚠️  Orientation MUST be non-zero: spin away from the default (north-facing) direction.\n"
+     "This is essential — 0.0 is too common in memory to scan for reliably."),
     ("Log Out",
-     "Log out of the game. This saves your current position and orientation\n"
-     "to the CMaNGOS database so the scanner can find it."),
+     "Log out of the game. This saves your position AND orientation to the CMaNGOS database.\n"
+     "The scan will fail if orientation is near zero — if unsure, go back and re-orient first."),
     ("Scan Memory",
-     "Log back in without moving, then click '🔍 Scan Memory'.\n"
-     "Live coordinates will appear once the address is found."),
+     "Log back in WITHOUT moving or turning, then click '🔍 Scan Memory'.\n"
+     "Live coordinates will appear once the address is found.\n"
+     "If the scan is blocked, it means orientation was near zero — go back to step 3."),
 ]
 
 # ── Wrapping button frame ─────────────────────────────────────────────────────
@@ -766,6 +768,11 @@ class App(tk.Tk):
         deg = math.degrees(o) % 360
         self.pos_label.config(
             text=f"X: {x:>10.2f}   Y: {y:>10.2f}   Z: {z:>8.2f}   O: {deg:>6.1f}°")
+        # Warn if orientation is suspiciously stuck at zero
+        if abs(o) < 0.001 and self.pos_addr:
+            self._set_status(
+                "⚠️  O: is 0.0 — orientation address may be wrong. "
+                "Go back to Step 3, re-orient, log out, rescan.")
 
     # ── capture ───────────────────────────────────────────────────────────────
     def _capture(self):
@@ -855,6 +862,17 @@ class App(tk.Tk):
             return
 
         tx, ty, tz, to_ = dbpos
+
+        # Orientation near zero → 0.0 is too common in memory; scan would be unreliable
+        if abs(to_) < 0.15:   # ~8.6 degrees
+            self._set_status(
+                f"⛔ Orientation in DB is {math.degrees(to_):.1f}° (near zero) — "
+                "go back to Step 3: log in, turn to a non-default direction, log out again")
+            # Snap wizard back to step 3 (Move & Orient) so the user knows what to do
+            self.wizard_step = 2
+            self._wizard_update()
+            return
+
         self._set_status(
             f"⏳ Scanning memory for X={tx:.2f} Y={ty:.2f} Z={tz:.2f} O={to_:.4f} …",
             fg="#f9e2af")
