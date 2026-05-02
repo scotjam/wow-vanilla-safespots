@@ -433,11 +433,11 @@ class App(tk.Tk):
                              bg=BTN, fg=FG, activebackground=ACC,
                              activeforeground="#1e1e2e", padx=6, pady=3, bd=0)
 
-        self.cap_btn = _btn("📍 Capture",      self._capture);    self.cap_btn.pack()
-        _btn("🗑 Clear all",   self._clear).pack()
-        _btn("💾 Append to file", self._save).pack()
-        _btn("🚀 Launch WoW", self._launch_wow).pack()
-        _btn("🔍 Scan Memory", self._scan).pack()
+        self.cap_btn    = _btn("📍 Capture",         self._capture);    self.cap_btn.pack()
+        _btn("🗑 Clear all",        self._clear).pack()
+        _btn("💾 Append to file",   self._save).pack()
+        self.launch_btn = _btn("🚀 Launch WoW",      self._launch_wow); self.launch_btn.pack()
+        self.scan_btn   = _btn("🔍 Scan Memory",     self._scan);       self.scan_btn.pack()
 
         # ── exe / process / output file (grid, each entry fills full width) ────
         cfg = tk.Frame(self, bg=BG)
@@ -555,11 +555,13 @@ class App(tk.Tk):
                 self._wizard_update()
 
     def _wizard_update(self):
-        BG  = "#1e1e2e"
-        ACC = "#89b4fa"
-        GRN = "#a6e3a1"
-        BTN = "#45475a"
-        FG  = "#cdd6f4"
+        BG   = "#1e1e2e"
+        ACC  = "#89b4fa"
+        GRN  = "#a6e3a1"
+        BTN  = "#45475a"
+        FG   = "#cdd6f4"
+        HILIGHT = "#f9e2af"   # amber — "click this button"
+
         for i, btn in enumerate(self._wiz_btns):
             if i == self.wizard_step:
                 btn.config(bg=ACC, fg="#1e1e2e")
@@ -567,6 +569,7 @@ class App(tk.Tk):
                 btn.config(bg=GRN, fg="#1e1e2e")
             else:
                 btn.config(bg=BTN, fg=FG)
+
         _, desc = WIZARD_STEPS[self.wizard_step]
         self._wiz_desc.config(text=f"Step {self.wizard_step + 1}: {desc}")
         self._wiz_back_btn.config(
@@ -575,6 +578,18 @@ class App(tk.Tk):
             self._wiz_next_btn.config(text="✓ All done!", state="disabled")
         else:
             self._wiz_next_btn.config(text="✓ Done, Next →", state="normal")
+
+        # Highlight the action button relevant to the current step
+        # (only if those buttons have already been created)
+        if not hasattr(self, "launch_btn"):
+            return
+        step = self.wizard_step
+        self.launch_btn.config(
+            bg=HILIGHT if step == 1 else BTN,
+            fg="#1e1e2e" if step == 1 else FG)
+        self.scan_btn.config(
+            bg=HILIGHT if step == 4 else BTN,
+            fg="#1e1e2e" if step == 4 else FG)
 
     def _wizard_next(self):
         self.wizard_done.add(self.wizard_step)
