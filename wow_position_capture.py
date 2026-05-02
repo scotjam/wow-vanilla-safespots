@@ -46,17 +46,6 @@ WOW_PROCESS_NAME = "wow.exe"   # lowercase — change if your exe has a differen
 kernel32  = ctypes.windll.kernel32
 ntdll     = ctypes.windll.ntdll
 
-TITAN_DLL = r"C:\Users\User\Downloads\x64dbg\release\x64\TitanEngine.dll"
-
-def titan_open_process(pid, access):
-    try:
-        titan = ctypes.CDLL(TITAN_DLL)
-        titan.TitanOpenProcess.restype  = ctypes.c_void_p
-        titan.TitanOpenProcess.argtypes = [wt.DWORD, ctypes.c_bool, wt.DWORD]
-        h = titan.TitanOpenProcess(access, False, pid)
-        return h if h else None
-    except Exception:
-        return None
 
 DBG_CONTINUE               = 0x00010002
 CREATE_PROCESS_DEBUG_EVENT = 3
@@ -892,11 +881,7 @@ class App(tk.Tk):
         log = []  # diagnostic log
         access = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION
 
-        handle = titan_open_process(pid, access)
-        log.append(f"TitanOpenProcess: {'ok' if handle else 'fail'}")
-
-        if not handle:
-            handle = kernel32.OpenProcess(access, False, pid)
+        handle = kernel32.OpenProcess(access, False, pid)
             log.append(f"OpenProcess(VM_READ): {'ok' if handle else 'err'+str(kernel32.GetLastError())}")
 
         if not handle:
