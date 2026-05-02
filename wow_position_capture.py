@@ -404,7 +404,7 @@ class App(tk.Tk):
         shape_flow.pack(fill="x", padx=PAD, pady=(4, 0))
         tk.Label(shape_flow, text="Zone shape:", bg=BG, fg=FG,
                  font=("Consolas", 10)).pack()
-        shapes = ["rectangle", "rhombus", "triangle", "pentagon", "pillar", "other"]
+        shapes = ["single point", "rectangle", "rhombus", "triangle", "pentagon", "pillar", "other"]
         for s in shapes:
             tk.Radiobutton(shape_flow, text=s, variable=self.shape, value=s,
                            indicatoron=False, font=("Consolas", 10),
@@ -453,10 +453,12 @@ class App(tk.Tk):
         self.exe_entry.grid(row=0, column=1, sticky="ew", padx=(4, 4), pady=1)
         self.exe_entry.bind("<FocusOut>", lambda e: self._sync_proc_from_exe())
         self.exe_entry.bind("<Return>",   lambda e: self._sync_proc_from_exe())
-        tk.Button(cfg, text="📂", font=("Consolas", 9), relief="flat",
-                  bg=BTN, fg=FG, activebackground=ACC, activeforeground="#1e1e2e",
-                  bd=0, padx=4, pady=2,
-                  command=self._browse_exe).grid(row=0, column=2, pady=1)
+        self.exe_browse_btn = tk.Button(cfg, text="📂", font=("Consolas", 9), relief="flat",
+                                        bg=BTN, fg=FG, activebackground=ACC,
+                                        activeforeground="#1e1e2e",
+                                        bd=0, padx=4, pady=2,
+                                        command=self._browse_exe)
+        self.exe_browse_btn.grid(row=0, column=2, pady=1)
 
         tk.Label(cfg, text="Process:", bg=BG, fg=FG,
                  font=("Consolas", 9)).grid(row=1, column=0, sticky="w", pady=1)
@@ -579,14 +581,25 @@ class App(tk.Tk):
         else:
             self._wiz_next_btn.config(text="✓ Done, Next →", state="normal")
 
-        # Highlight the action button relevant to the current step
-        # (only if those buttons have already been created)
+        # Highlight action buttons / fields relevant to the current step
+        # (guard against being called before widgets are built)
         if not hasattr(self, "launch_btn"):
             return
         step = self.wizard_step
+
+        # Exe path field + browse button — step 0
+        exe_hl = step == 0
+        self.exe_entry.config(bg=HILIGHT if exe_hl else "#313244")
+        self.exe_browse_btn.config(
+            bg=HILIGHT if exe_hl else BTN,
+            fg="#1e1e2e" if exe_hl else FG)
+
+        # Launch WoW button — step 1
         self.launch_btn.config(
             bg=HILIGHT if step == 1 else BTN,
             fg="#1e1e2e" if step == 1 else FG)
+
+        # Scan Memory button — step 4
         self.scan_btn.config(
             bg=HILIGHT if step == 4 else BTN,
             fg="#1e1e2e" if step == 4 else FG)
