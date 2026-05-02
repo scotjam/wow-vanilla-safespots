@@ -589,7 +589,10 @@ class App(tk.Tk):
 
         # Exe path field + browse button — step 0
         exe_hl = step == 0
-        self.exe_entry.config(bg=HILIGHT if exe_hl else "#313244")
+        self.exe_entry.config(
+            bg=HILIGHT    if exe_hl else "#313244",
+            fg="#1e1e2e"  if exe_hl else FG,
+            insertbackground="#1e1e2e" if exe_hl else FG)
         self.exe_browse_btn.config(
             bg=HILIGHT if exe_hl else BTN,
             fg="#1e1e2e" if exe_hl else FG)
