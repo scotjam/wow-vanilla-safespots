@@ -14,108 +14,15 @@ import time
 import math
 import os
 
-# ── WoW 1.12.1 build 5875 memory offsets ─────────────────────────────────────
-OBJECT_MANAGER_PTR  = 0x00B41414   # pointer-to-pointer to object manager
-CUR_MGR_OFFSET      = 0x1C
-FIRST_OBJ_OFFSET    = 0xAC
-LOCAL_GUID_OFFSET   = 0xC0
-NEXT_OBJ_OFFSET     = 0x3C
-OBJ_TYPE_OFFSET     = 0x14
-OBJ_GUID_OFFSET     = 0x30
-
-# From player object base
-POS_X_OFFSET        = 0x9B8
-POS_Y_OFFSET        = 0x9BC
-POS_Z_OFFSET        = 0x9C0
-FACING_OFFSET       = 0x9C4
-
 PROCESS_VM_READ            = 0x0010
 PROCESS_QUERY_INFORMATION  = 0x0400
-PROCESS_ALL_ACCESS         = 0x1F0FFF
 PROCESS_TERMINATE          = 0x0001
 TH32CS_SNAPPROCESS         = 0x00000002
-DEBUG_PROCESS              = 0x00000001
-EXCEPTION_DEBUG_EVENT      = 1
-EXIT_PROCESS_DEBUG_EVENT   = 5
-DBG_EXCEPTION_NOT_HANDLED  = 0x80010001
 
 WOW_EXE          = r"D:\World of Warcraft Classic 1.12.1\WoW.exe"
-WOW_DIR          = r"D:\World of Warcraft Classic 1.12.1"
 WOW_PROCESS_NAME = "wow.exe"   # lowercase — change if your exe has a different name
 
-kernel32  = ctypes.windll.kernel32
-ntdll     = ctypes.windll.ntdll
-
-
-DBG_CONTINUE               = 0x00010002
-CREATE_PROCESS_DEBUG_EVENT = 3
-
-class _CREATE_PROCESS_INFO(ctypes.Structure):
-    _fields_ = [("hFile",                 wt.HANDLE),
-                ("hProcess",              wt.HANDLE),
-                ("hThread",               wt.HANDLE),
-                ("lpBaseOfImage",         ctypes.c_void_p),
-                ("dwDebugInfoFileOffset", wt.DWORD),
-                ("nDebugInfoSize",        wt.DWORD),
-                ("lpThreadLocalBase",     ctypes.c_void_p),
-                ("lpStartAddress",        ctypes.c_void_p),
-                ("lpImageName",           ctypes.c_void_p),
-                ("fUnicode",              wt.WORD)]
-
-class _DEBUG_EVENT_UNION(ctypes.Union):
-    _fields_ = [("CreateProcessInfo", _CREATE_PROCESS_INFO),
-                ("_pad",              ctypes.c_byte * 160)]
-
-class _DEBUG_EVENT(ctypes.Structure):
-    _fields_ = [("dwDebugEventCode", wt.DWORD),
-                ("dwProcessId",      wt.DWORD),
-                ("dwThreadId",       wt.DWORD),
-                ("u",                _DEBUG_EVENT_UNION)]
-
-def open_process_via_debug(pid):
-    """
-    Attach as debugger. The CREATE_PROCESS_DEBUG_EVENT hands us hProcess
-    directly from the kernel — never calls OpenProcess, so AV can't block it.
-    Detach immediately after grabbing the handle; WoW resumes, handle stays valid.
-    """
-    if not kernel32.DebugActiveProcess(pid):
-        return None
-    ev = _DEBUG_EVENT()
-    handle = None
-    for _ in range(100):
-        if not kernel32.WaitForDebugEvent(ctypes.byref(ev), 200):
-            continue
-        if ev.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT:
-            handle = ev.u.CreateProcessInfo.hProcess  # kernel-granted handle
-        kernel32.ContinueDebugEvent(ev.dwProcessId, ev.dwThreadId, DBG_CONTINUE)
-        if handle:
-            break
-    kernel32.DebugActiveProcessStop(pid)
-    return handle
-
-# NtOpenProcess structures (fallback)
-class _OBJECT_ATTRIBUTES(ctypes.Structure):
-    _fields_ = [("Length",                   ctypes.c_ulong),
-                ("RootDirectory",            ctypes.c_void_p),
-                ("ObjectName",               ctypes.c_void_p),
-                ("Attributes",               ctypes.c_ulong),
-                ("SecurityDescriptor",       ctypes.c_void_p),
-                ("SecurityQualityOfService", ctypes.c_void_p)]
-
-class _CLIENT_ID(ctypes.Structure):
-    _fields_ = [("UniqueProcess", ctypes.c_void_p),
-                ("UniqueThread",  ctypes.c_void_p)]
-
-def nt_open_process(pid, access):
-    h  = ctypes.c_void_p(0)
-    oa = _OBJECT_ATTRIBUTES()
-    oa.Length = ctypes.sizeof(_OBJECT_ATTRIBUTES)
-    cid = _CLIENT_ID()
-    cid.UniqueProcess = ctypes.c_void_p(pid)
-    cid.UniqueThread  = ctypes.c_void_p(0)
-    status = ntdll.NtOpenProcess(ctypes.byref(h), access,
-                                 ctypes.byref(oa), ctypes.byref(cid))
-    return h.value if status == 0 else None
+kernel32 = ctypes.windll.kernel32
 
 class STARTUPINFOW(ctypes.Structure):
     _fields_ = [("cb",              wt.DWORD),
@@ -197,24 +104,6 @@ class PROCESSENTRY32(ctypes.Structure):
         ('dwFlags',             wt.DWORD),
         ('szExeFile',           ctypes.c_char * 260),
     ]
-
-def list_all_pids():
-    """Return list of (pid, exe_name) for all running processes."""
-    procs = []
-    snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-    if snapshot == wt.HANDLE(-1).value:
-        return procs
-    entry = PROCESSENTRY32()
-    entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
-    try:
-        if kernel32.Process32First(snapshot, ctypes.byref(entry)):
-            while True:
-                procs.append((entry.th32ProcessID, entry.szExeFile.decode(errors='replace')))
-                if not kernel32.Process32Next(snapshot, ctypes.byref(entry)):
-                    break
-    finally:
-        kernel32.CloseHandle(snapshot)
-    return procs
 
 def find_wow_pid(process_name=None):
     name = (process_name or WOW_PROCESS_NAME).lower().encode()
@@ -334,141 +223,21 @@ def read_bytes(handle, addr, n):
                                       buf, n, ctypes.byref(read))
     return buf.raw if ok else None
 
-def read_u32(handle, addr):
-    d = read_bytes(handle, addr, 4)
-    return struct.unpack('<I', d)[0] if d else None
-
-def read_u64(handle, addr):
-    d = read_bytes(handle, addr, 8)
-    return struct.unpack('<Q', d)[0] if d else None
-
 def read_f32(handle, addr):
     d = read_bytes(handle, addr, 4)
     return struct.unpack('<f', d)[0] if d else None
 
-def get_player_pos(handle, pos_addr=None):
-    """
-    Read player (x,y,z,facing).
-    If pos_addr is given (found via memory scan), read directly from that address.
-    Otherwise fall back to the object manager walk.
-    """
-    if pos_addr:
-        x = read_f32(handle, pos_addr)
-        y = read_f32(handle, pos_addr + 4)
-        z = read_f32(handle, pos_addr + 8)
-        o = read_f32(handle, pos_addr + 12)
-        if None not in (x, y, z, o):
-            return x, y, z, o
+def get_player_pos(handle, pos_addr):
+    """Read player (x, y, z, facing) directly from the scanned address."""
+    if not pos_addr:
         return None
-
-    # Object manager walk (fallback)
-    om_ptr = read_u32(handle, OBJECT_MANAGER_PTR)
-    if not om_ptr:
-        return None
-    cur_mgr = read_u32(handle, om_ptr + CUR_MGR_OFFSET)
-    if not cur_mgr:
-        return None
-    local_guid = read_u64(handle, cur_mgr + LOCAL_GUID_OFFSET)
-    if not local_guid:
-        return None
-    obj = read_u32(handle, cur_mgr + FIRST_OBJ_OFFSET)
-    for _ in range(2000):
-        if not obj or obj % 4 != 0:
-            break
-        guid = read_u64(handle, obj + OBJ_GUID_OFFSET)
-        if guid == local_guid:
-            x = read_f32(handle, obj + POS_X_OFFSET)
-            y = read_f32(handle, obj + POS_Y_OFFSET)
-            z = read_f32(handle, obj + POS_Z_OFFSET)
-            o = read_f32(handle, obj + FACING_OFFSET)
-            if None not in (x, y, z, o):
-                return x, y, z, o
-            return None
-        nxt = read_u32(handle, obj + NEXT_OBJ_OFFSET)
-        if nxt == obj:
-            break
-        obj = nxt
+    x = read_f32(handle, pos_addr)
+    y = read_f32(handle, pos_addr + 4)
+    z = read_f32(handle, pos_addr + 8)
+    o = read_f32(handle, pos_addr + 12)
+    if None not in (x, y, z, o):
+        return x, y, z, o
     return None
-
-def _hex_row(handle, base, offset, n=16):
-    d = read_bytes(handle, base + offset, n)
-    if not d:
-        return f"  +0x{offset:03X}: <unreadable>"
-    hex_part = ' '.join(f'{b:02X}' for b in d)
-    dwords = ' '.join(f'[{struct.unpack_from("<I",d,i)[0]:08X}]' for i in range(0,n,4))
-    return f"  +0x{offset:03X}: {hex_part}   {dwords}"
-
-def diagnose_handle(handle):
-    """Return a short string; also writes wow_obj_dump.txt with full details."""
-    if not handle:
-        return "no handle"
-    buf   = ctypes.create_string_buffer(4)
-    nread = ctypes.c_size_t(0)
-    ok = kernel32.ReadProcessMemory(handle, ctypes.c_void_p(OBJECT_MANAGER_PTR),
-                                    buf, 4, ctypes.byref(nread))
-    if not ok:
-        err = kernel32.GetLastError()
-        return f"ReadProcessMemory FAILED at 0x{OBJECT_MANAGER_PTR:08X} (err {err})"
-    om_ptr = struct.unpack('<I', buf.raw)[0]
-    if not om_ptr:
-        return "object manager ptr = 0 — login/char-select screen, keep waiting"
-
-    try:
-        log_path = os.path.expanduser("~\\Desktop\\wow_obj_dump.txt")
-        with open(log_path, "w") as f:
-            f.write(f"=== WoW Object Manager Diagnostic ===\n")
-            f.write(f"OBJECT_MANAGER_PTR : 0x{OBJECT_MANAGER_PTR:08X}\n")
-            f.write(f"om_ptr (value)     : 0x{om_ptr:08X}\n\n")
-
-            # Try four possible CUR_MGR_OFFSET values
-            f.write("--- om_ptr + various offsets (finding cur_mgr) ---\n")
-            for off in [0x14, 0x18, 0x1C, 0x20, 0x24]:
-                v = read_u32(handle, om_ptr + off)
-                marker = " ← current CUR_MGR_OFFSET" if off == CUR_MGR_OFFSET else ""
-                f.write(f"  om_ptr+0x{off:02X} = 0x{(v or 0):08X}{marker}\n")
-            f.write("\n")
-
-            # For each candidate cur_mgr, show FIRST_OBJ and LOCAL_GUID candidates
-            f.write("--- Scanning candidate cur_mgr values ---\n")
-            for cmoff in [0x18, 0x1C]:
-                cm = read_u32(handle, om_ptr + cmoff)
-                if not cm:
-                    continue
-                f.write(f"\n  cur_mgr (om_ptr+0x{cmoff:02X}) = 0x{cm:08X}\n")
-                for foff in range(0x98, 0xC4, 4):
-                    v = read_u32(handle, cm + foff)
-                    f.write(f"    +0x{foff:02X} = 0x{(v or 0):08X}\n")
-
-            # Current values
-            cur_mgr    = read_u32(handle, om_ptr + CUR_MGR_OFFSET)
-            local_guid = read_u64(handle, cur_mgr + LOCAL_GUID_OFFSET) if cur_mgr else 0
-            first_obj  = read_u32(handle, cur_mgr + FIRST_OBJ_OFFSET)  if cur_mgr else 0
-
-            f.write(f"\n=== Current offsets (CUR_MGR=0x{CUR_MGR_OFFSET:02X} FIRST_OBJ=0x{FIRST_OBJ_OFFSET:02X} LOCAL_GUID=0x{LOCAL_GUID_OFFSET:02X}) ===\n")
-            f.write(f"cur_mgr    : 0x{(cur_mgr or 0):08X}\n")
-            f.write(f"local_guid : 0x{(local_guid or 0):016X}\n")
-            f.write(f"first_obj  : 0x{(first_obj or 0):08X}\n\n")
-
-            # Raw hex dump of first 256 bytes of first_obj (sentinel/header node)
-            if first_obj:
-                f.write(f"--- Raw hex dump: first_obj 0x{first_obj:08X} (first 256 bytes) ---\n")
-                for row in range(0, 256, 16):
-                    f.write(_hex_row(handle, first_obj, row) + "\n")
-
-                # Also dump the object pointed to by next@+0x3C (first real object?)
-                nxt = read_u32(handle, first_obj + 0x3C)
-                if nxt and nxt != first_obj and nxt % 4 == 0 and nxt > 0x10000:
-                    f.write(f"\n--- Raw hex dump: first_obj->next (0x{nxt:08X}) first 256 bytes ---\n")
-                    for row in range(0, 256, 16):
-                        f.write(_hex_row(handle, nxt, row) + "\n")
-
-    except Exception as e:
-        pass
-
-    cur_mgr = read_u32(handle, om_ptr + CUR_MGR_OFFSET) if om_ptr else 0
-    local_guid = read_u64(handle, cur_mgr + LOCAL_GUID_OFFSET) if cur_mgr else 0
-    return (f"om_ptr=0x{om_ptr:08X} cur_mgr=0x{(cur_mgr or 0):08X} "
-            f"guid=0x{(local_guid or 0):016X} — full dump → wow_obj_dump.txt on Desktop")
 
 # ── Wizard step definitions ───────────────────────────────────────────────────
 WIZARD_STEPS = [
@@ -850,72 +619,28 @@ class App(tk.Tk):
         ttk.Button(dlg, text="OK", command=_apply).grid(
             row=len(fields), column=0, columnspan=2, pady=(0, 8))
 
-    # ── connection ────────────────────────────────────────────────────────────
-    def _reconnect(self):
-        """Re-run _connect using whatever is in the process name field."""
-        if self.handle:
-            kernel32.CloseHandle(self.handle)
-            self.handle = None
-        self._connect()
-
+    # ── connection (startup only — primary path is Launch WoW button) ──────────
     def _connect(self):
-        # Use process name from UI field if available, else fall back to constant
+        """Try to attach to an already-running WoW process on startup."""
         proc_name = getattr(self, 'proc_entry', None)
         proc_name = proc_name.get().strip() if proc_name else WOW_PROCESS_NAME
         pid = find_wow_pid(proc_name)
         if pid is None:
-            # Dump all running processes to the log so we can see the real name
-            try:
-                procs = list_all_pids()
-                log_path = os.path.expanduser("~\\Desktop\\wow_attach_log.txt")
-                with open(log_path, "w") as f:
-                    f.write(f"Looking for: {proc_name}\n")
-                    f.write("Running processes:\n")
-                    for p_pid, p_name in sorted(procs, key=lambda x: x[1].lower()):
-                        f.write(f"  {p_pid:>6}  {p_name}\n")
-            except Exception:
-                pass
-            self._set_status(f"❌ '{proc_name}' not found — check wow_attach_log.txt on Desktop for actual process name")
+            self._set_status("⏳ WoW not running — use 🚀 Launch WoW to start it")
             return
-
-        log = []  # diagnostic log
-        access = PROCESS_VM_READ | PROCESS_QUERY_INFORMATION
-
-        handle = kernel32.OpenProcess(access, False, pid)
-            log.append(f"OpenProcess(VM_READ): {'ok' if handle else 'err'+str(kernel32.GetLastError())}")
-
+        handle = kernel32.OpenProcess(
+            PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, False, pid)
         if not handle:
-            handle = nt_open_process(pid, access)
-            log.append(f"NtOpenProcess(VM_READ): {'ok' if handle else 'fail'}")
-
-        if not handle:
-            handle = open_process_via_debug(pid)
-            log.append(f"DebugAttach: {'ok' if handle else 'fail, DebugActiveProcess err='+str(kernel32.GetLastError())}")
-
-        if not handle:
-            handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
-            log.append(f"OpenProcess(ALL): {'ok' if handle else 'err'+str(kernel32.GetLastError())}")
-
-        if not handle:
-            handle = nt_open_process(pid, PROCESS_ALL_ACCESS)
-            log.append(f"NtOpenProcess(ALL): {'ok' if handle else 'fail'}")
-
-        # Write diagnostic log to desktop
-        try:
-            with open(os.path.expanduser("~\\Desktop\\wow_attach_log.txt"), "w") as f:
-                f.write(f"PID: {pid}\n" + "\n".join(log))
-        except Exception:
-            pass
-
-        if not handle:
-            self._set_status(f"❌ PID {pid} — all methods failed. See wow_attach_log.txt on Desktop.")
+            self._set_status(
+                f"⚠️  Found PID {pid} but OpenProcess failed (err {kernel32.GetLastError()}) "
+                f"— use 🚀 Launch WoW instead")
             return
         self.handle = handle
-        self._set_status(f"✅ Attached to WoW.exe  (PID {pid})", fg="#a6e3a1")
+        self._set_status(f"✅ Attached to {proc_name}  (PID {pid})", fg="#a6e3a1")
 
     # ── polling loop ──────────────────────────────────────────────────────────
     def _poll_loop(self):
-        diag_counter = 0
+        warn_counter = 0
         while self.running:
             if self.handle:
                 pos = get_player_pos(self.handle, self.pos_addr)
@@ -924,14 +649,14 @@ class App(tk.Tk):
                     self.last_pos = pos
                     self.after(0, self._update_display, x, y, z, o)
                 else:
-                    diag_counter += 1
-                    if diag_counter % 8 == 1:
+                    warn_counter += 1
+                    if warn_counter % 8 == 1:
                         if self.pos_addr:
                             self.after(0, self._set_status,
                                        f"⚠️  pos_addr=0x{self.pos_addr:08X} unreadable — rescan needed?")
                         else:
-                            msg = diagnose_handle(self.handle)
-                            self.after(0, self._set_status, f"⚠️  {msg}")
+                            self.after(0, self._set_status,
+                                       "⏳ Log in and use 🔍 Scan Memory to find position address")
             time.sleep(0.25)
 
     def _update_display(self, x, y, z, o):
