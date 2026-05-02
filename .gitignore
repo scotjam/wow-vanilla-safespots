@@ -1,0 +1,4 @@
+*.pyc
+__pycache__/
+captured_zone.md
+*.log
