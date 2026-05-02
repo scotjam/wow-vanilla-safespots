@@ -5,7 +5,7 @@ Click "Capture" to add current position to the list.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import ctypes
 import ctypes.wintypes as wt
 import struct
@@ -448,9 +448,13 @@ class App(tk.Tk):
                                   insertbackground=FG,
                                   font=("Consolas", 9), relief="flat")
         self.exe_entry.insert(0, WOW_EXE)
-        self.exe_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=1)
+        self.exe_entry.grid(row=0, column=1, sticky="ew", padx=(4, 4), pady=1)
         self.exe_entry.bind("<FocusOut>", lambda e: self._sync_proc_from_exe())
         self.exe_entry.bind("<Return>",   lambda e: self._sync_proc_from_exe())
+        tk.Button(cfg, text="📂", font=("Consolas", 9), relief="flat",
+                  bg=BTN, fg=FG, activebackground=ACC, activeforeground="#1e1e2e",
+                  bd=0, padx=4, pady=2,
+                  command=self._browse_exe).grid(row=0, column=2, pady=1)
 
         tk.Label(cfg, text="Process:", bg=BG, fg=FG,
                  font=("Consolas", 9)).grid(row=1, column=0, sticky="w", pady=1)
@@ -501,6 +505,20 @@ class App(tk.Tk):
         return _set
 
     # ── wizard helpers ────────────────────────────────────────────────────────
+    def _browse_exe(self):
+        """Open a file-picker dialog and populate the exe path field."""
+        current = self.exe_entry.get().strip()
+        init_dir = os.path.dirname(current) if current and os.path.exists(
+            os.path.dirname(current)) else "C:\\"
+        path = filedialog.askopenfilename(
+            title="Select WoW executable",
+            initialdir=init_dir,
+            filetypes=[("Executable", "*.exe"), ("All files", "*.*")])
+        if path:
+            self.exe_entry.delete(0, "end")
+            self.exe_entry.insert(0, path)
+            self._sync_proc_from_exe()
+
     def _sync_proc_from_exe(self):
         """Auto-fill the Process name field from the exe path basename."""
         exe = self.exe_entry.get().strip()
