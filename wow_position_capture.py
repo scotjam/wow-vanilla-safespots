@@ -614,7 +614,7 @@ class App(tk.Tk):
         ttk.Button(ctrl, text="🗑 Clear all",
                    command=self._clear).grid(row=0, column=3, padx=4)
 
-        ttk.Button(ctrl, text="💾 Save .md",
+        ttk.Button(ctrl, text="💾 Append to file",
                    command=self._save).grid(row=0, column=4, padx=4)
 
         ttk.Button(ctrl, text="🚀 Launch WoW",
@@ -641,6 +641,18 @@ class App(tk.Tk):
         ttk.Button(proc_row, text="🔍 Re-attach",
                    command=self._reconnect).pack(side="left", padx=4)
 
+        # output file row
+        file_row = ttk.Frame(self, padding=(PAD, 0, PAD, 4))
+        file_row.pack(fill="x")
+        ttk.Label(file_row, text="Output file:").pack(side="left")
+        self.file_entry = tk.Entry(file_row, bg="#313244", fg="#cdd6f4",
+                                   insertbackground="#cdd6f4",
+                                   font=("Consolas", 10), relief="flat")
+        _default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "safe zones in dungeons.md")
+        self.file_entry.insert(0, _default_out)
+        self.file_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
+
         # bind Enter key to capture
         self.bind("<Return>", lambda e: self._capture())
 
@@ -660,8 +672,9 @@ class App(tk.Tk):
         sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
 
-        # right-click to delete row
-        self.tree.bind("<Button-3>", self._right_click)
+        # right-click menu, double-click to edit label
+        self.tree.bind("<Button-3>",  self._right_click)
+        self.tree.bind("<Double-1>",  self._edit_label)
 
     def _make_set_status(self):
         """Return a callable that sets the status entry text + colour."""
@@ -804,32 +817,76 @@ class App(tk.Tk):
         item = self.tree.identify_row(event.y)
         if item:
             menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="Delete this row",
+            menu.add_command(label="✏️  Edit label",
+                             command=lambda: self._edit_label_for(item))
+            menu.add_command(label="🗑  Delete row",
                              command=lambda: self._delete_row(item))
             menu.tk_popup(event.x_root, event.y_root)
+
+    def _edit_label(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self._edit_label_for(item)
+
+    def _edit_label_for(self, item):
+        idx     = self.tree.index(item)
+        cur_lbl = self.captures[idx][0]
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Edit label")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.configure(bg="#1e1e2e")
+
+        ttk.Label(dlg, text="Label:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        entry = tk.Entry(dlg, width=24, bg="#313244", fg="#cdd6f4",
+                         insertbackground="#cdd6f4", font=("Consolas", 10), relief="flat")
+        entry.insert(0, cur_lbl)
+        entry.grid(row=0, column=1, padx=(0, 8), pady=8)
+        entry.focus_set()
+        entry.select_range(0, "end")
+
+        def _apply(*_):
+            new_lbl = entry.get().strip() or cur_lbl
+            old = self.captures[idx]
+            self.captures[idx] = (new_lbl,) + old[1:]
+            vals = list(self.tree.item(item, "values"))
+            vals[0] = new_lbl
+            self.tree.item(item, values=vals)
+            dlg.destroy()
+
+        entry.bind("<Return>", _apply)
+        ttk.Button(dlg, text="OK", command=_apply).grid(row=1, column=0, columnspan=2, pady=(0, 8))
 
     def _delete_row(self, item):
         idx = self.tree.index(item)
         self.captures.pop(idx)
         self.tree.delete(item)
 
-    # ── save ─────────────────────────────────────────────────────────────────
+    # ── save / append ─────────────────────────────────────────────────────────
     def _save(self):
         if not self.captures:
             messagebox.showinfo("Nothing to save", "No points captured yet.")
             return
-        shape = self.shape.get()
-        lines = [f"### Captured Zone ({shape})\n",
-                 f"| Point | X | Y | Z | Facing |\n",
-                 f"|-------|-------|-------|-------|--------|\n"]
-        for label, x, y, z, o in self.captures:
-            lines.append(f"| {label} | {x:.2f} | {y:.2f} | {z:.2f} | {math.degrees(o):.1f}° |\n")
 
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "captured_zone.md")
-        with open(path, "w") as f:
-            f.writelines(lines)
-        messagebox.showinfo("Saved", f"Saved to:\n{path}")
+        path  = self.file_entry.get().strip()
+        shape = self.shape.get()
+
+        # Build the block to append
+        lines = [f"\n### Captured Zone ({shape})\n",
+                 f"| Point | X | Y | Z |\n",
+                 f"|-------|---------|---------|-------|\n"]
+        for label, x, y, z, o in self.captures:
+            lines.append(f"| {label} | {x:.2f} | {y:.2f} | {z:.2f} |\n")
+
+        try:
+            mode = "a" if os.path.exists(path) else "w"
+            with open(path, mode, encoding="utf-8") as f:
+                f.writelines(lines)
+            action = "Appended to" if mode == "a" else "Created"
+            messagebox.showinfo("Saved", f"{action}:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
 
     # ── memory scan to find player position address ───────────────────────────
     def _scan(self):
