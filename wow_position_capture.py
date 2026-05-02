@@ -44,7 +44,6 @@ WOW_DIR          = r"D:\World of Warcraft Classic 1.12.1"
 WOW_PROCESS_NAME = "wow.exe"   # lowercase — change if your exe has a different name
 
 kernel32  = ctypes.windll.kernel32
-advapi32  = ctypes.windll.advapi32
 ntdll     = ctypes.windll.ntdll
 
 TITAN_DLL = r"C:\Users\User\Downloads\x64dbg\release\x64\TitanEngine.dll"
@@ -194,35 +193,6 @@ def launch_wow_debug(exe_path=None):
 
     return pi.hProcess, pi.dwProcessId
 
-def enable_debug_privilege():
-    """Activate SeDebugPrivilege so we can open any process (requires admin)."""
-    TOKEN_ADJUST_PRIVILEGES = 0x0020
-    TOKEN_QUERY             = 0x0008
-    SE_PRIVILEGE_ENABLED    = 0x00000002
-
-    class LUID(ctypes.Structure):
-        _fields_ = [("LowPart", wt.DWORD), ("HighPart", wt.LONG)]
-
-    class LUID_AND_ATTRIBUTES(ctypes.Structure):
-        _fields_ = [("Luid", LUID), ("Attributes", wt.DWORD)]
-
-    class TOKEN_PRIVILEGES(ctypes.Structure):
-        _fields_ = [("PrivilegeCount", wt.DWORD),
-                    ("Privileges", LUID_AND_ATTRIBUTES * 1)]
-
-    h_token = wt.HANDLE()
-    advapi32.OpenProcessToken(kernel32.GetCurrentProcess(),
-                              TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-                              ctypes.byref(h_token))
-    luid = LUID()
-    advapi32.LookupPrivilegeValueW(None, "SeDebugPrivilege", ctypes.byref(luid))
-    tp = TOKEN_PRIVILEGES()
-    tp.PrivilegeCount = 1
-    tp.Privileges[0].Luid = luid
-    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED
-    advapi32.AdjustTokenPrivileges(h_token, False, ctypes.byref(tp),
-                                   ctypes.sizeof(tp), None, None)
-    kernel32.CloseHandle(h_token)
 
 # ── Win32 process enumeration ─────────────────────────────────────────────────
 class PROCESSENTRY32(ctypes.Structure):
@@ -669,14 +639,18 @@ class App(tk.Tk):
 
         ttk.Separator(self, orient="horizontal").pack(fill="x", padx=PAD, pady=(0, 4))
 
-        # ── shape selector ────────────────────────────────────────────────────
-        mid = ttk.Frame(self, padding=(PAD, 0))
-        mid.pack(fill="x")
-        ttk.Label(mid, text="Zone shape:").grid(row=0, column=0, sticky="w")
+        # ── shape selector (wrapping) ─────────────────────────────────────────
+        shape_flow = FlowFrame(self, gap=4, bg=BG)
+        shape_flow.pack(fill="x", padx=PAD, pady=(4, 0))
+        tk.Label(shape_flow, text="Zone shape:", bg=BG, fg=FG,
+                 font=("Consolas", 10)).pack()
         shapes = ["rectangle", "rhombus", "triangle", "pentagon", "pillar", "other"]
-        for i, s in enumerate(shapes):
-            ttk.Radiobutton(mid, text=s, variable=self.shape, value=s,
-                            style="TButton").grid(row=0, column=i+1, padx=2)
+        for s in shapes:
+            tk.Radiobutton(shape_flow, text=s, variable=self.shape, value=s,
+                           indicatoron=False, font=("Consolas", 10),
+                           bg=BTN, fg=FG, selectcolor=ACC,
+                           activebackground=ACC, activeforeground="#1e1e2e",
+                           relief="flat", bd=0, padx=6, pady=3).pack()
 
         # ── label entry + capture buttons (wrapping flow) ─────────────────────
         lbl_row = tk.Frame(self, bg=BG)
@@ -705,40 +679,38 @@ class App(tk.Tk):
         _btn("🚀 Launch WoW", self._launch_wow).pack()
         _btn("🔍 Scan Memory", self._scan).pack()
 
-        # ── exe / process row ─────────────────────────────────────────────────
+        # ── exe / process / output file (grid, each entry fills full width) ────
         cfg = tk.Frame(self, bg=BG)
-        cfg.pack(fill="x", padx=PAD, pady=(2, 0))
+        cfg.pack(fill="x", padx=PAD, pady=(2, 4))
+        cfg.columnconfigure(1, weight=1)
 
         tk.Label(cfg, text="Exe path:", bg=BG, fg=FG,
-                 font=("Consolas", 9)).pack(side="left")
+                 font=("Consolas", 9)).grid(row=0, column=0, sticky="w", pady=1)
         self.exe_entry = tk.Entry(cfg, bg=ENTRY, fg=FG,
                                   insertbackground=FG,
                                   font=("Consolas", 9), relief="flat")
         self.exe_entry.insert(0, WOW_EXE)
-        self.exe_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
+        self.exe_entry.grid(row=0, column=1, sticky="ew", padx=(4, 0), pady=1)
         self.exe_entry.bind("<FocusOut>", lambda e: self._sync_proc_from_exe())
         self.exe_entry.bind("<Return>",   lambda e: self._sync_proc_from_exe())
 
         tk.Label(cfg, text="Process:", bg=BG, fg=FG,
-                 font=("Consolas", 9)).pack(side="left")
-        self.proc_entry = tk.Entry(cfg, width=16, bg=ENTRY, fg=FG,
+                 font=("Consolas", 9)).grid(row=1, column=0, sticky="w", pady=1)
+        self.proc_entry = tk.Entry(cfg, bg=ENTRY, fg=FG,
                                    insertbackground=FG,
                                    font=("Consolas", 9), relief="flat")
         self.proc_entry.insert(0, WOW_PROCESS_NAME)
-        self.proc_entry.pack(side="left", padx=(4, 0))
+        self.proc_entry.grid(row=1, column=1, sticky="ew", padx=(4, 0), pady=1)
 
-        # ── output file row ───────────────────────────────────────────────────
-        frow = tk.Frame(self, bg=BG)
-        frow.pack(fill="x", padx=PAD, pady=(2, 4))
-        tk.Label(frow, text="Output file:", bg=BG, fg=FG,
-                 font=("Consolas", 9)).pack(side="left")
-        self.file_entry = tk.Entry(frow, bg=ENTRY, fg=FG,
+        tk.Label(cfg, text="Output file:", bg=BG, fg=FG,
+                 font=("Consolas", 9)).grid(row=2, column=0, sticky="w", pady=1)
+        self.file_entry = tk.Entry(cfg, bg=ENTRY, fg=FG,
                                    insertbackground=FG,
                                    font=("Consolas", 9), relief="flat")
         _default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "safe zones in dungeons.md")
         self.file_entry.insert(0, _default_out)
-        self.file_entry.pack(side="left", padx=(4, 0), fill="x", expand=True)
+        self.file_entry.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=1)
 
         self.bind("<Return>", lambda e: self._capture())
 
@@ -898,7 +870,6 @@ class App(tk.Tk):
         self._connect()
 
     def _connect(self):
-        enable_debug_privilege()
         # Use process name from UI field if available, else fall back to constant
         proc_name = getattr(self, 'proc_entry', None)
         proc_name = proc_name.get().strip() if proc_name else WOW_PROCESS_NAME
@@ -1117,8 +1088,6 @@ class App(tk.Tk):
         if self.handle:
             kernel32.CloseHandle(self.handle)
             self.handle = None
-
-        enable_debug_privilege()
 
         exe_path = self.exe_entry.get().strip()
 
