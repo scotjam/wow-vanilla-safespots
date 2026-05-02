@@ -293,10 +293,11 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.configure(bg="#1e1e2e")
 
-        self.handle      = None
-        self.pos_addr    = None
-        self.running     = True
-        self.captures    = []
+        self.handle          = None
+        self.pos_addr        = None
+        self.pos_candidates  = []   # all addresses from last scan
+        self.running         = True
+        self.captures        = []
         self.shape       = tk.StringVar(value="rectangle")
         self.last_pos    = None
         self.wizard_step = 0          # 0-based index into WIZARD_STEPS
@@ -306,6 +307,7 @@ class App(tk.Tk):
         self.attributes("-topmost", True)
         self._set_status = self._make_set_status()
         self.geometry("700x640+10+10")
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
         self._connect()
         threading.Thread(target=self._poll_loop, daemon=True).start()
 
@@ -472,7 +474,11 @@ class App(tk.Tk):
         _default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "safe zones in dungeons.md")
         self.file_entry.insert(0, _default_out)
-        self.file_entry.grid(row=2, column=1, sticky="ew", padx=(4, 0), pady=1)
+        self.file_entry.grid(row=2, column=1, sticky="ew", padx=(4, 4), pady=1)
+        tk.Button(cfg, text="📂", font=("Consolas", 9), relief="flat",
+                  bg=BTN, fg=FG, activebackground=ACC, activeforeground="#1e1e2e",
+                  bd=0, padx=4, pady=2,
+                  command=self._browse_output).grid(row=2, column=2, pady=1)
 
         self.bind("<Return>", lambda e: self._capture())
 
@@ -518,6 +524,22 @@ class App(tk.Tk):
             self.exe_entry.delete(0, "end")
             self.exe_entry.insert(0, path)
             self._sync_proc_from_exe()
+
+    def _browse_output(self):
+        """Open a save-file dialog and populate the output file field."""
+        current = self.file_entry.get().strip()
+        init_dir  = os.path.dirname(current) if current else os.path.dirname(
+            os.path.abspath(__file__))
+        init_file = os.path.basename(current) if current else "safe zones in dungeons.md"
+        path = filedialog.asksaveasfilename(
+            title="Choose output file",
+            initialdir=init_dir,
+            initialfile=init_file,
+            defaultextension=".md",
+            filetypes=[("Markdown", "*.md"), ("Text", "*.txt"), ("All files", "*.*")])
+        if path:
+            self.file_entry.delete(0, "end")
+            self.file_entry.insert(0, path)
 
     def _sync_proc_from_exe(self):
         """Auto-fill the Process name field from the exe path basename."""
@@ -657,11 +679,43 @@ class App(tk.Tk):
         self._set_status(f"✅ Attached to {proc_name}  (PID {pid})", fg="#a6e3a1")
 
     # ── polling loop ──────────────────────────────────────────────────────────
+    def _read_best_pos(self):
+        """
+        Read the player position. If multiple scan candidates exist, compare
+        them on every poll and lock onto the first address that diverges from
+        the rest — that's the live player struct.
+        """
+        if not self.handle:
+            return None
+
+        candidates = self.pos_candidates
+        if len(candidates) <= 1:
+            return get_player_pos(self.handle, self.pos_addr)
+
+        readings = [(addr, get_player_pos(self.handle, addr)) for addr in candidates]
+        valid    = [(addr, pos) for addr, pos in readings if pos]
+        if not valid:
+            return None
+
+        # If any address has a different X from the rest, it's the live one
+        xs      = [pos[0] for _, pos in valid]
+        mean_x  = sum(xs) / len(xs)
+        outlier = next(((a, p) for a, p in valid if abs(p[0] - mean_x) > 0.05), None)
+        if outlier:
+            addr, pos = outlier
+            self.pos_addr       = addr
+            self.pos_candidates = [addr]
+            self.after(0, self._set_status,
+                       f"✅ Live address locked: 0x{addr:08X}", "#a6e3a1")
+            return pos
+
+        return valid[0][1]   # all identical — return first
+
     def _poll_loop(self):
         warn_counter = 0
         while self.running:
             if self.handle:
-                pos = get_player_pos(self.handle, self.pos_addr)
+                pos = self._read_best_pos()
                 if pos:
                     x, y, z, o = pos
                     self.last_pos = pos
@@ -794,11 +848,11 @@ class App(tk.Tk):
                            f"⚠️  {len(hits)} matches — try tighter tolerance or move slightly and rescan")
                 return
 
-            # Use first hit; if multiple exist, prefer one where nearby bytes look plausible
-            addr = hits[0]
-            self.pos_addr = addr
+            self.pos_candidates = hits
+            self.pos_addr       = hits[0]
+            note = " — move to lock live addr" if len(hits) > 1 else ""
             self.after(0, self._set_status,
-                       f"✅ Found at 0x{addr:08X} ({len(hits)} hit(s)) — coords live",
+                       f"✅ Found {len(hits)} candidate(s) at 0x{hits[0]:08X}{note}",
                        "#a6e3a1")
             # auto-advance wizard: "Scan Memory" (step 4) → all done
             def _adv_scan():
@@ -842,6 +896,15 @@ class App(tk.Tk):
         threading.Thread(target=_do_launch, daemon=True).start()
 
     def destroy(self):
+        if self.captures:
+            choice = messagebox.askyesnocancel(
+                "Save before exit",
+                f"You have {len(self.captures)} captured point(s).\n"
+                "Save to output file before closing?")
+            if choice is None:       # Cancel — don't close
+                return
+            if choice:               # Yes — save then close
+                self._save()
         self.running = False
         if self.handle:
             kernel32.CloseHandle(self.handle)
