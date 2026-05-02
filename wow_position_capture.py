@@ -511,6 +511,52 @@ def diagnose_handle(handle):
     return (f"om_ptr=0x{om_ptr:08X} cur_mgr=0x{(cur_mgr or 0):08X} "
             f"guid=0x{(local_guid or 0):016X} — full dump → wow_obj_dump.txt on Desktop")
 
+# ── Wizard step definitions ───────────────────────────────────────────────────
+WIZARD_STEPS = [
+    ("Exe Path",
+     "Enter the full path to your WoW executable in the 'Exe path' field below.\n"
+     "The Process name field will fill automatically."),
+    ("Launch WoW",
+     "Click '🚀 Launch WoW'. The game starts through the tool so it can access memory."),
+    ("Move & Orient",
+     "Log in, walk to a new position and turn to face a new direction.\n"
+     "This gives the scanner a known coordinate to search for."),
+    ("Log Out",
+     "Log out of the game. This saves your current position and orientation\n"
+     "to the CMaNGOS database so the scanner can find it."),
+    ("Scan Memory",
+     "Log back in without moving, then click '🔍 Scan Memory'.\n"
+     "Live coordinates will appear once the address is found."),
+]
+
+# ── Wrapping button frame ─────────────────────────────────────────────────────
+class FlowFrame(tk.Frame):
+    """Lays out children left-to-right, wrapping to the next row on resize."""
+    def __init__(self, master, gap=4, **kw):
+        kw.setdefault("bg", "#1e1e2e")
+        super().__init__(master, **kw)
+        self._gap = gap
+        self.bind("<Configure>", self._reflow)
+
+    def _reflow(self, _=None):
+        self.update_idletasks()
+        w = self.winfo_width()
+        if w <= 1:
+            self.after(20, self._reflow)
+            return
+        g = self._gap
+        x, y, rh = g, g, 0
+        for c in self.winfo_children():
+            cw = c.winfo_reqwidth()
+            ch = c.winfo_reqheight()
+            if x + cw + g > w and x > g:
+                x, y = g, y + rh + g
+                rh = 0
+            c.place(x=x, y=y)
+            x += cw + g
+            rh = max(rh, ch)
+        self.configure(height=y + rh + g)
+
 # ── GUI ───────────────────────────────────────────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -519,17 +565,19 @@ class App(tk.Tk):
         self.resizable(True, True)
         self.configure(bg="#1e1e2e")
 
-        self.handle    = None
-        self.pos_addr  = None   # direct address found by memory scan
-        self.running   = True
-        self.captures  = []
-        self.shape     = tk.StringVar(value="rectangle")
-        self.last_pos  = None
+        self.handle      = None
+        self.pos_addr    = None
+        self.running     = True
+        self.captures    = []
+        self.shape       = tk.StringVar(value="rectangle")
+        self.last_pos    = None
+        self.wizard_step = 0          # 0-based index into WIZARD_STEPS
+        self.wizard_done = set()      # indices of manually-confirmed steps
 
         self._build_ui()
-        self.attributes("-topmost", True)   # always on top of WoW
+        self.attributes("-topmost", True)
         self._set_status = self._make_set_status()
-        self.geometry("620x520+10+10")      # position top-left
+        self.geometry("700x640+10+10")
         self._connect()
         threading.Thread(target=self._poll_loop, daemon=True).start()
 
@@ -541,6 +589,7 @@ class App(tk.Tk):
         ENTRY = "#313244"
         ACC   = "#89b4fa"
         BTN   = "#45475a"
+        GRN   = "#a6e3a1"
 
         style = ttk.Style(self)
         style.theme_use("clam")
@@ -549,10 +598,8 @@ class App(tk.Tk):
                         font=("Consolas", 10))
         style.configure("Header.TLabel", background=BG, foreground=ACC,
                         font=("Consolas", 11, "bold"))
-        style.configure("Pos.TLabel",    background=BG, foreground="#a6e3a1",
+        style.configure("Pos.TLabel",    background=BG, foreground=GRN,
                         font=("Consolas", 13, "bold"))
-        style.configure("Status.TLabel", background=BG, foreground="#f38ba8",
-                        font=("Consolas", 9))
         style.configure("TButton",       background=BTN, foreground=FG,
                         font=("Consolas", 10), relief="flat", padding=4)
         style.map("TButton", background=[("active", ACC)],
@@ -562,119 +609,157 @@ class App(tk.Tk):
                         font=("Consolas", 9))
         style.configure("Treeview.Heading", background=BTN, foreground=ACC,
                         font=("Consolas", 9, "bold"))
+        style.configure("TLabelframe",        background=BG)
+        style.configure("TLabelframe.Label",  background=BG, foreground=ACC,
+                        font=("Consolas", 9, "bold"))
 
         # ── top: live coords ──────────────────────────────────────────────────
         top = ttk.Frame(self, padding=PAD)
         top.pack(fill="x")
-
         ttk.Label(top, text="LIVE POSITION", style="Header.TLabel").pack(anchor="w")
-
         self.pos_label = ttk.Label(top, text="X: ---   Y: ---   Z: ---   O: ---",
                                    style="Pos.TLabel")
-        self.pos_label.pack(anchor="w", pady=(2, 4))
-
+        self.pos_label.pack(anchor="w", pady=(2, 2))
         self.status_label = tk.Entry(top, font=("Consolas", 9),
-                                     bg="#1e1e2e", fg="#f38ba8",
+                                     bg=BG, fg="#f38ba8",
                                      insertbackground="#f38ba8",
-                                     relief="flat", state="readonly",
-                                     readonlybackground="#1e1e2e")
+                                     relief="flat", readonlybackground=BG)
         self.status_label.pack(anchor="w", fill="x")
-        self.status_label.config(state="normal")
         self.status_label.insert(0, "⏳ Connecting to WoW...")
         self.status_label.config(state="readonly")
 
-        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=PAD)
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=PAD, pady=(4, 0))
+
+        # ── wizard ────────────────────────────────────────────────────────────
+        wiz = ttk.LabelFrame(self, text="Setup Steps", padding=(PAD, 4))
+        wiz.pack(fill="x", padx=PAD, pady=4)
+
+        # step indicator buttons (navigate on click)
+        step_bar = tk.Frame(wiz, bg=BG)
+        step_bar.pack(fill="x")
+        self._wiz_btns = []
+        for i, (title, _) in enumerate(WIZARD_STEPS):
+            btn = tk.Button(step_bar, text=f"  {i+1}. {title}  ",
+                            font=("Consolas", 9), relief="flat", bd=0,
+                            cursor="hand2",
+                            command=lambda idx=i: self._wizard_goto(idx))
+            btn.pack(side="left", padx=2, pady=2)
+            self._wiz_btns.append(btn)
+
+        # description
+        self._wiz_desc = tk.Label(wiz, text="", bg=BG, fg=FG,
+                                  font=("Consolas", 9), justify="left",
+                                  anchor="w", wraplength=600)
+        self._wiz_desc.pack(fill="x", pady=(4, 4))
+
+        # nav buttons
+        nav = tk.Frame(wiz, bg=BG)
+        nav.pack(fill="x")
+        self._wiz_back_btn = tk.Button(nav, text="← Back",
+                                       font=("Consolas", 9), relief="flat",
+                                       bg=BTN, fg=FG, bd=0, padx=8, pady=3,
+                                       command=self._wizard_back)
+        self._wiz_back_btn.pack(side="left", padx=(0, 6))
+        self._wiz_next_btn = tk.Button(nav, text="✓ Done, Next →",
+                                       font=("Consolas", 9, "bold"),
+                                       relief="flat", bg=ACC, fg="#1e1e2e",
+                                       bd=0, padx=8, pady=3,
+                                       command=self._wizard_next)
+        self._wiz_next_btn.pack(side="left")
+
+        ttk.Separator(self, orient="horizontal").pack(fill="x", padx=PAD, pady=(0, 4))
 
         # ── shape selector ────────────────────────────────────────────────────
-        mid = ttk.Frame(self, padding=PAD)
+        mid = ttk.Frame(self, padding=(PAD, 0))
         mid.pack(fill="x")
-
         ttk.Label(mid, text="Zone shape:").grid(row=0, column=0, sticky="w")
         shapes = ["rectangle", "rhombus", "triangle", "pentagon", "pillar", "other"]
         for i, s in enumerate(shapes):
             ttk.Radiobutton(mid, text=s, variable=self.shape, value=s,
-                            style="TButton").grid(row=0, column=i+1,
-                                                  padx=2, sticky="w")
+                            style="TButton").grid(row=0, column=i+1, padx=2)
 
-        # ── capture controls ──────────────────────────────────────────────────
-        ctrl = ttk.Frame(self, padding=(PAD, 0, PAD, PAD))
-        ctrl.pack(fill="x")
-
-        ttk.Label(ctrl, text="Label:").grid(row=0, column=0, sticky="w")
-        self.lbl_entry = tk.Entry(ctrl, width=18, bg="#313244", fg="#cdd6f4",
-                                  insertbackground="#cdd6f4",
-                                  font=("Consolas", 10), relief="flat")
-        self.lbl_entry.grid(row=0, column=1, padx=(4, 8), sticky="w")
+        # ── label entry + capture buttons (wrapping flow) ─────────────────────
+        lbl_row = tk.Frame(self, bg=BG)
+        lbl_row.pack(fill="x", padx=PAD, pady=(4, 0))
+        tk.Label(lbl_row, text="Label:", bg=BG, fg=FG,
+                 font=("Consolas", 10)).pack(side="left")
+        self.lbl_entry = tk.Entry(lbl_row, width=16, bg=ENTRY, fg=FG,
+                                  insertbackground=FG, font=("Consolas", 10),
+                                  relief="flat")
         self.lbl_entry.insert(0, "point 1")
+        self.lbl_entry.pack(side="left", padx=(4, 8))
 
-        self.cap_btn = ttk.Button(ctrl, text="📍 Capture",
-                                  command=self._capture)
-        self.cap_btn.grid(row=0, column=2, padx=4)
+        flow = FlowFrame(self, gap=4, bg=BG)
+        flow.pack(fill="x", padx=PAD, pady=(2, 2))
+        self.bind("<Configure>", lambda e: flow._reflow())
 
-        ttk.Button(ctrl, text="🗑 Clear all",
-                   command=self._clear).grid(row=0, column=3, padx=4)
+        def _btn(text, cmd):
+            return tk.Button(flow, text=text, command=cmd,
+                             font=("Consolas", 10), relief="flat",
+                             bg=BTN, fg=FG, activebackground=ACC,
+                             activeforeground="#1e1e2e", padx=6, pady=3, bd=0)
 
-        ttk.Button(ctrl, text="💾 Append to file",
-                   command=self._save).grid(row=0, column=4, padx=4)
+        self.cap_btn = _btn("📍 Capture",      self._capture);    self.cap_btn.pack()
+        _btn("🗑 Clear all",   self._clear).pack()
+        _btn("💾 Append to file", self._save).pack()
+        _btn("🚀 Launch WoW", self._launch_wow).pack()
+        _btn("🔍 Scan Memory", self._scan).pack()
 
-        ttk.Button(ctrl, text="🚀 Launch WoW",
-                   command=self._launch_wow).grid(row=0, column=5, padx=4)
+        # ── exe / process row ─────────────────────────────────────────────────
+        cfg = tk.Frame(self, bg=BG)
+        cfg.pack(fill="x", padx=PAD, pady=(2, 0))
 
-        ttk.Button(ctrl, text="🔍 Scan Memory",
-                   command=self._scan).grid(row=0, column=6, padx=4)
-
-        # process name + exe path row
-        proc_row = ttk.Frame(self, padding=(PAD, 0, PAD, 4))
-        proc_row.pack(fill="x")
-        ttk.Label(proc_row, text="Process:").pack(side="left")
-        self.proc_entry = tk.Entry(proc_row, width=18, bg="#313244", fg="#cdd6f4",
-                                   insertbackground="#cdd6f4",
-                                   font=("Consolas", 10), relief="flat")
-        self.proc_entry.insert(0, WOW_PROCESS_NAME)
-        self.proc_entry.pack(side="left", padx=(4, 8))
-        ttk.Label(proc_row, text="Exe path:").pack(side="left")
-        self.exe_entry = tk.Entry(proc_row, width=38, bg="#313244", fg="#cdd6f4",
-                                  insertbackground="#cdd6f4",
-                                  font=("Consolas", 10), relief="flat")
+        tk.Label(cfg, text="Exe path:", bg=BG, fg=FG,
+                 font=("Consolas", 9)).pack(side="left")
+        self.exe_entry = tk.Entry(cfg, bg=ENTRY, fg=FG,
+                                  insertbackground=FG,
+                                  font=("Consolas", 9), relief="flat")
         self.exe_entry.insert(0, WOW_EXE)
-        self.exe_entry.pack(side="left", padx=(4, 8))
-        ttk.Button(proc_row, text="🔍 Re-attach",
-                   command=self._reconnect).pack(side="left", padx=4)
+        self.exe_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
+        self.exe_entry.bind("<FocusOut>", lambda e: self._sync_proc_from_exe())
+        self.exe_entry.bind("<Return>",   lambda e: self._sync_proc_from_exe())
 
-        # output file row
-        file_row = ttk.Frame(self, padding=(PAD, 0, PAD, 4))
-        file_row.pack(fill="x")
-        ttk.Label(file_row, text="Output file:").pack(side="left")
-        self.file_entry = tk.Entry(file_row, bg="#313244", fg="#cdd6f4",
-                                   insertbackground="#cdd6f4",
-                                   font=("Consolas", 10), relief="flat")
+        tk.Label(cfg, text="Process:", bg=BG, fg=FG,
+                 font=("Consolas", 9)).pack(side="left")
+        self.proc_entry = tk.Entry(cfg, width=16, bg=ENTRY, fg=FG,
+                                   insertbackground=FG,
+                                   font=("Consolas", 9), relief="flat")
+        self.proc_entry.insert(0, WOW_PROCESS_NAME)
+        self.proc_entry.pack(side="left", padx=(4, 0))
+
+        # ── output file row ───────────────────────────────────────────────────
+        frow = tk.Frame(self, bg=BG)
+        frow.pack(fill="x", padx=PAD, pady=(2, 4))
+        tk.Label(frow, text="Output file:", bg=BG, fg=FG,
+                 font=("Consolas", 9)).pack(side="left")
+        self.file_entry = tk.Entry(frow, bg=ENTRY, fg=FG,
+                                   insertbackground=FG,
+                                   font=("Consolas", 9), relief="flat")
         _default_out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                     "safe zones in dungeons.md")
         self.file_entry.insert(0, _default_out)
-        self.file_entry.pack(side="left", padx=(4, 8), fill="x", expand=True)
+        self.file_entry.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
-        # bind Enter key to capture
         self.bind("<Return>", lambda e: self._capture())
 
         # ── capture list ──────────────────────────────────────────────────────
         cols = ("label", "x", "y", "z", "facing", "dist")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings",
-                                 height=16)
-        widths = {"label": 100, "x": 90, "y": 90, "z": 70,
-                  "facing": 70, "dist": 80}
+        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=10)
+        widths = {"label": 110, "x": 90, "y": 90, "z": 70, "facing": 70, "dist": 80}
         heads  = {"label": "Label", "x": "X", "y": "Y", "z": "Z",
-                  "facing": "Facing", "dist": "Dist from prev"}
+                  "facing": "Facing (O)", "dist": "Dist prev"}
         for c in cols:
             self.tree.heading(c, text=heads[c])
             self.tree.column(c, width=widths[c], anchor="center")
-        self.tree.pack(fill="both", expand=True, padx=PAD, pady=(4, PAD))
-
         sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
+        self.tree.pack(fill="both", expand=True, padx=PAD, pady=(0, PAD))
 
-        # right-click menu, double-click to edit label
-        self.tree.bind("<Button-3>",  self._right_click)
-        self.tree.bind("<Double-1>",  self._edit_label)
+        self.tree.bind("<Button-3>", self._right_click)
+        self.tree.bind("<Double-1>", self._edit_row_event)
+
+        # initialise wizard display
+        self._wizard_update()
 
     def _make_set_status(self):
         """Return a callable that sets the status entry text + colour."""
@@ -684,6 +769,125 @@ class App(tk.Tk):
             self.status_label.insert(0, text)
             self.status_label.config(state="readonly")
         return _set
+
+    # ── wizard helpers ────────────────────────────────────────────────────────
+    def _sync_proc_from_exe(self):
+        """Auto-fill the Process name field from the exe path basename."""
+        exe = self.exe_entry.get().strip()
+        if exe:
+            name = os.path.basename(exe).lower()
+            self.proc_entry.delete(0, "end")
+            self.proc_entry.insert(0, name)
+            # auto-advance wizard: "Exe Path" (step 0) → "Launch WoW" (step 1)
+            if self.wizard_step == 0:
+                self.wizard_done.add(0)
+                self.wizard_step = 1
+                self._wizard_update()
+
+    def _wizard_update(self):
+        BG  = "#1e1e2e"
+        ACC = "#89b4fa"
+        GRN = "#a6e3a1"
+        BTN = "#45475a"
+        FG  = "#cdd6f4"
+        for i, btn in enumerate(self._wiz_btns):
+            if i == self.wizard_step:
+                btn.config(bg=ACC, fg="#1e1e2e")
+            elif i in self.wizard_done:
+                btn.config(bg=GRN, fg="#1e1e2e")
+            else:
+                btn.config(bg=BTN, fg=FG)
+        _, desc = WIZARD_STEPS[self.wizard_step]
+        self._wiz_desc.config(text=f"Step {self.wizard_step + 1}: {desc}")
+        self._wiz_back_btn.config(
+            state="normal" if self.wizard_step > 0 else "disabled")
+        if self.wizard_step >= len(WIZARD_STEPS) - 1:
+            self._wiz_next_btn.config(text="✓ All done!", state="disabled")
+        else:
+            self._wiz_next_btn.config(text="✓ Done, Next →", state="normal")
+
+    def _wizard_next(self):
+        self.wizard_done.add(self.wizard_step)
+        if self.wizard_step < len(WIZARD_STEPS) - 1:
+            self.wizard_step += 1
+        self._wizard_update()
+
+    def _wizard_back(self):
+        if self.wizard_step > 0:
+            self.wizard_step -= 1
+        self._wizard_update()
+
+    def _wizard_goto(self, idx):
+        self.wizard_step = idx
+        self._wizard_update()
+
+    # ── row edit dialog (double-click / right-click → Edit) ───────────────────
+    def _edit_row_event(self, event):
+        item = self.tree.identify_row(event.y)
+        if item:
+            self._edit_row(item)
+
+    def _edit_row(self, item):
+        idx = self.tree.index(item)
+        lbl, cx, cy, cz, co = self.captures[idx]
+
+        BG    = "#1e1e2e"
+        FG    = "#cdd6f4"
+        ENTRY = "#313244"
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Edit point")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.configure(bg=BG)
+
+        fields = [("Label",   str(lbl)),
+                  ("X",       f"{cx:.4f}"),
+                  ("Y",       f"{cy:.4f}"),
+                  ("Z",       f"{cz:.4f}"),
+                  ("O (rad)", f"{co:.6f}")]
+
+        entries = []
+        for row_i, (name, val) in enumerate(fields):
+            ttk.Label(dlg, text=f"{name}:").grid(
+                row=row_i, column=0, padx=8, pady=4, sticky="w")
+            e = tk.Entry(dlg, width=26, bg=ENTRY, fg=FG,
+                         insertbackground=FG,
+                         font=("Consolas", 10), relief="flat")
+            e.insert(0, val)
+            e.grid(row=row_i, column=1, padx=(0, 8), pady=4)
+            entries.append(e)
+        entries[0].focus_set()
+        entries[0].select_range(0, "end")
+
+        def _apply(*_):
+            try:
+                new_lbl = entries[0].get().strip() or lbl
+                new_x   = float(entries[1].get())
+                new_y   = float(entries[2].get())
+                new_z   = float(entries[3].get())
+                new_o   = float(entries[4].get())
+            except ValueError:
+                messagebox.showerror("Invalid",
+                                     "X, Y, Z, O must be numbers.", parent=dlg)
+                return
+            self.captures[idx] = (new_lbl, new_x, new_y, new_z, new_o)
+            dist_str = "—"
+            if idx > 0:
+                px, py, pz = self.captures[idx - 1][1:4]
+                d = math.sqrt((new_x - px)**2 + (new_y - py)**2 + (new_z - pz)**2)
+                dist_str = f"{d:.2f}"
+            self.tree.item(item, values=(new_lbl,
+                                         f"{new_x:.2f}", f"{new_y:.2f}",
+                                         f"{new_z:.2f}",
+                                         f"{math.degrees(new_o):.1f}°",
+                                         dist_str))
+            dlg.destroy()
+
+        for e in entries:
+            e.bind("<Return>", _apply)
+        ttk.Button(dlg, text="OK", command=_apply).grid(
+            row=len(fields), column=0, columnspan=2, pady=(0, 8))
 
     # ── connection ────────────────────────────────────────────────────────────
     def _reconnect(self):
@@ -817,46 +1021,11 @@ class App(tk.Tk):
         item = self.tree.identify_row(event.y)
         if item:
             menu = tk.Menu(self, tearoff=0)
-            menu.add_command(label="✏️  Edit label",
-                             command=lambda: self._edit_label_for(item))
+            menu.add_command(label="✏️  Edit point",
+                             command=lambda: self._edit_row(item))
             menu.add_command(label="🗑  Delete row",
                              command=lambda: self._delete_row(item))
             menu.tk_popup(event.x_root, event.y_root)
-
-    def _edit_label(self, event):
-        item = self.tree.identify_row(event.y)
-        if item:
-            self._edit_label_for(item)
-
-    def _edit_label_for(self, item):
-        idx     = self.tree.index(item)
-        cur_lbl = self.captures[idx][0]
-
-        dlg = tk.Toplevel(self)
-        dlg.title("Edit label")
-        dlg.resizable(False, False)
-        dlg.attributes("-topmost", True)
-        dlg.configure(bg="#1e1e2e")
-
-        ttk.Label(dlg, text="Label:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        entry = tk.Entry(dlg, width=24, bg="#313244", fg="#cdd6f4",
-                         insertbackground="#cdd6f4", font=("Consolas", 10), relief="flat")
-        entry.insert(0, cur_lbl)
-        entry.grid(row=0, column=1, padx=(0, 8), pady=8)
-        entry.focus_set()
-        entry.select_range(0, "end")
-
-        def _apply(*_):
-            new_lbl = entry.get().strip() or cur_lbl
-            old = self.captures[idx]
-            self.captures[idx] = (new_lbl,) + old[1:]
-            vals = list(self.tree.item(item, "values"))
-            vals[0] = new_lbl
-            self.tree.item(item, values=vals)
-            dlg.destroy()
-
-        entry.bind("<Return>", _apply)
-        ttk.Button(dlg, text="OK", command=_apply).grid(row=1, column=0, columnspan=2, pady=(0, 8))
 
     def _delete_row(self, item):
         idx = self.tree.index(item)
@@ -932,6 +1101,12 @@ class App(tk.Tk):
             self.after(0, self._set_status,
                        f"✅ Found at 0x{addr:08X} ({len(hits)} hit(s)) — coords live",
                        "#a6e3a1")
+            # auto-advance wizard: "Scan Memory" (step 4) → all done
+            def _adv_scan():
+                if self.wizard_step == 4:
+                    self.wizard_done.add(4)
+                    self._wizard_update()
+            self.after(0, _adv_scan)
 
         threading.Thread(target=_do_scan, daemon=True).start()
 
@@ -959,6 +1134,13 @@ class App(tk.Tk):
             self.after(0, self._set_status,
                        f"✅ WoW launched (PID {pid}) — log in to see coords",
                        "#a6e3a1")
+            # auto-advance wizard: "Launch WoW" (step 1) → "Move & Orient" (step 2)
+            def _adv_launch():
+                if self.wizard_step == 1:
+                    self.wizard_done.add(1)
+                    self.wizard_step = 2
+                    self._wizard_update()
+            self.after(0, _adv_launch)
 
         threading.Thread(target=_do_launch, daemon=True).start()
 
