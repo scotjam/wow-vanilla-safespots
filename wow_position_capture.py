@@ -13,6 +13,7 @@ import threading
 import time
 import math
 import os
+import re
 
 PROCESS_VM_READ            = 0x0010
 PROCESS_QUERY_INFORMATION  = 0x0400
@@ -239,6 +240,17 @@ def get_player_pos(handle, pos_addr):
         return x, y, z, o
     return None
 
+# Expected point count per shape (None = variable)
+SHAPE_POINTS = {
+    "single point": 1,
+    "rectangle":    2,
+    "rhombus":      4,
+    "triangle":     3,
+    "pentagon":     5,
+    "pillar":       4,
+    "other":        None,
+}
+
 # ── Wizard step definitions ───────────────────────────────────────────────────
 WIZARD_STEPS = [
     ("Exe Path",
@@ -299,7 +311,7 @@ class App(tk.Tk):
         self.pos_addr        = None
         self.pos_candidates  = []   # all addresses from last scan
         self.running         = True
-        self.captures        = []
+        self.groups          = []   # [{"shape": str, "tree_id": str, "points": [(lbl,x,y,z,o),...]}]
         self.shape       = tk.StringVar(value="rectangle")
         self.last_pos    = None
         self.wizard_step = 0          # 0-based index into WIZARD_STEPS
@@ -487,20 +499,39 @@ class App(tk.Tk):
         self.bind("<Return>", lambda e: self._capture())
 
         # ── capture list ──────────────────────────────────────────────────────
-        cols = ("label", "x", "y", "z", "facing", "dist")
-        self.tree = ttk.Treeview(self, columns=cols, show="headings", height=10)
-        widths = {"label": 110, "x": 90, "y": 90, "z": 70, "facing": 70, "dist": 80}
-        heads  = {"label": "Label", "x": "X", "y": "Y", "z": "Z",
-                  "facing": "Facing (O)", "dist": "Dist prev"}
+        cols = ("x", "y", "z", "facing", "dist")
+        self.tree = ttk.Treeview(self, columns=cols, show="tree headings", height=10)
+        self.tree.heading("#0",       text="Label");      self.tree.column("#0", width=120, anchor="w", stretch=True)
+        widths = {"x": 80, "y": 80, "z": 65, "facing": 70, "dist": 75}
+        heads  = {"x": "X", "y": "Y", "z": "Z", "facing": "Facing (O)", "dist": "Dist prev"}
         for c in cols:
             self.tree.heading(c, text=heads[c])
             self.tree.column(c, width=widths[c], anchor="center")
+        # Row styles
+        self.tree.tag_configure("group",
+                                background="#313244", foreground=ACC,
+                                font=("Consolas", 9, "bold"))
+        self.tree.tag_configure("point",
+                                background=ENTRY, foreground=FG,
+                                font=("Consolas", 9))
         sb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=sb.set)
-        self.tree.pack(fill="both", expand=True, padx=PAD, pady=(0, PAD))
+        self.tree.pack(fill="both", expand=True, padx=PAD, pady=(0, 2))
 
-        self.tree.bind("<Button-3>", self._right_click)
-        self.tree.bind("<Double-1>", self._edit_row_event)
+        self.tree.bind("<Button-3>",        self._right_click)
+        self.tree.bind("<Double-1>",        self._edit_row_event)
+        self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+
+        # ── .go command display ───────────────────────────────────────────────
+        go_row = tk.Frame(self, bg=BG)
+        go_row.pack(fill="x", padx=PAD, pady=(0, PAD))
+        tk.Label(go_row, text=".go:", bg=BG, fg=FG,
+                 font=("Consolas", 9)).pack(side="left")
+        self.go_entry = tk.Entry(go_row, bg=ENTRY, fg=GRN,
+                                 insertbackground=GRN, font=("Consolas", 10),
+                                 relief="flat", readonlybackground=ENTRY,
+                                 state="readonly")
+        self.go_entry.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
         # initialise wizard display
         self._wizard_update()
@@ -624,15 +655,44 @@ class App(tk.Tk):
         self.wizard_step = idx
         self._wizard_update()
 
+    # ── treeview helpers ──────────────────────────────────────────────────────
+    def _find_point(self, item):
+        """Return (group_idx, point_idx) for a point item, or (None, None)."""
+        parent = self.tree.parent(item)
+        for gi, g in enumerate(self.groups):
+            if g["tree_id"] == parent:
+                children = list(self.tree.get_children(parent))
+                return gi, children.index(item)
+        return None, None
+
+    def _set_go_command(self, text):
+        self.go_entry.config(state="normal")
+        self.go_entry.delete(0, "end")
+        self.go_entry.insert(0, text)
+        self.go_entry.config(state="readonly")
+
+    def _on_tree_select(self, _event=None):
+        sel = self.tree.selection()
+        if not sel or "point" not in self.tree.item(sel[0], "tags"):
+            self._set_go_command("")
+            return
+        gi, pi = self._find_point(sel[0])
+        if gi is None:
+            return
+        _, x, y, z, _ = self.groups[gi]["points"][pi]
+        self._set_go_command(f".go {x:.2f} {y:.2f} {z:.2f}")
+
     # ── row edit dialog (double-click / right-click → Edit) ───────────────────
     def _edit_row_event(self, event):
         item = self.tree.identify_row(event.y)
-        if item:
+        if item and "point" in self.tree.item(item, "tags"):
             self._edit_row(item)
 
     def _edit_row(self, item):
-        idx = self.tree.index(item)
-        lbl, cx, cy, cz, co = self.captures[idx]
+        gi, pi = self._find_point(item)
+        if gi is None:
+            return
+        lbl, cx, cy, cz, co = self.groups[gi]["points"][pi]
 
         BG    = "#1e1e2e"
         FG    = "#cdd6f4"
@@ -674,17 +734,16 @@ class App(tk.Tk):
                 messagebox.showerror("Invalid",
                                      "X, Y, Z, O must be numbers.", parent=dlg)
                 return
-            self.captures[idx] = (new_lbl, new_x, new_y, new_z, new_o)
+            self.groups[gi]["points"][pi] = (new_lbl, new_x, new_y, new_z, new_o)
             dist_str = "—"
-            if idx > 0:
-                px, py, pz = self.captures[idx - 1][1:4]
-                d = math.sqrt((new_x - px)**2 + (new_y - py)**2 + (new_z - pz)**2)
+            if pi > 0:
+                _, px, py_, pz, _ = self.groups[gi]["points"][pi - 1]
+                d = math.sqrt((new_x-px)**2 + (new_y-py_)**2 + (new_z-pz)**2)
                 dist_str = f"{d:.2f}"
-            self.tree.item(item, values=(new_lbl,
-                                         f"{new_x:.2f}", f"{new_y:.2f}",
-                                         f"{new_z:.2f}",
-                                         f"{math.degrees(new_o):.1f}°",
-                                         dist_str))
+            self.tree.item(item, text=new_lbl,
+                           values=(f"{new_x:.2f}", f"{new_y:.2f}",
+                                   f"{new_z:.2f}", f"{math.degrees(new_o):.1f}°",
+                                   dist_str))
             dlg.destroy()
 
         for e in entries:
@@ -780,23 +839,35 @@ class App(tk.Tk):
             messagebox.showwarning("No data", "No position data yet.")
             return
         x, y, z, o = self.last_pos
-        label = self.lbl_entry.get().strip() or f"point {len(self.captures)+1}"
+        total_pts = sum(len(g["points"]) for g in self.groups)
+        label = self.lbl_entry.get().strip() or f"point {total_pts + 1}"
+        shape = self.shape.get()
 
-        # distance from previous capture
+        # Start a new group when shape changes or no group exists yet
+        if not self.groups or self.groups[-1]["shape"] != shape:
+            gid = self.tree.insert("", "end",
+                                   text=f"▾  {shape.title()}",
+                                   values=("", "", "", "", ""),
+                                   tags=("group",), open=True)
+            self.groups.append({"shape": shape, "tree_id": gid, "points": []})
+
+        g = self.groups[-1]
+
+        # Distance from previous point within this group
         dist_str = "—"
-        if self.captures:
-            px, py, pz = self.captures[-1][1:4]
+        if g["points"]:
+            _, px, py, pz, _ = g["points"][-1]
             d = math.sqrt((x-px)**2 + (y-py)**2 + (z-pz)**2)
             dist_str = f"{d:.2f}"
 
-        self.captures.append((label, x, y, z, o))
-        self.tree.insert("", "end",
-                         values=(label, f"{x:.2f}", f"{y:.2f}",
-                                 f"{z:.2f}", f"{math.degrees(o):.1f}°",
-                                 dist_str))
+        g["points"].append((label, x, y, z, o))
+        self.tree.insert(g["tree_id"], "end",
+                         text=label,
+                         values=(f"{x:.2f}", f"{y:.2f}", f"{z:.2f}",
+                                 f"{math.degrees(o):.1f}°", dist_str),
+                         tags=("point",))
 
-        # auto-increment label if it ends with a number
-        import re
+        # Auto-increment label if it ends with a number
         m = re.match(r'^(.*?)(\d+)$', label)
         if m:
             self.lbl_entry.delete(0, "end")
@@ -804,40 +875,111 @@ class App(tk.Tk):
 
     def _clear(self):
         if messagebox.askyesno("Clear", "Clear all captured points?"):
-            self.captures.clear()
+            self.groups.clear()
             for item in self.tree.get_children():
                 self.tree.delete(item)
+            self._set_go_command("")
 
+    # ── right-click context menu ──────────────────────────────────────────────
     def _right_click(self, event):
         item = self.tree.identify_row(event.y)
-        if item:
-            menu = tk.Menu(self, tearoff=0)
+        if not item:
+            return
+        tags = self.tree.item(item, "tags")
+        menu = tk.Menu(self, tearoff=0)
+
+        if "group" in tags:
+            shape_menu = tk.Menu(menu, tearoff=0)
+            for s in SHAPE_POINTS:
+                shape_menu.add_command(
+                    label=s,
+                    command=lambda sh=s, it=item: self._change_group_shape(it, sh))
+            menu.add_cascade(label="Change shape to ▶", menu=shape_menu)
+            menu.add_separator()
+            menu.add_command(label="🗑  Delete zone",
+                             command=lambda: self._delete_group(item))
+        elif "point" in tags:
             menu.add_command(label="✏️  Edit point",
                              command=lambda: self._edit_row(item))
-            menu.add_command(label="🗑  Delete row",
+            menu.add_command(label="🗑  Delete point",
                              command=lambda: self._delete_row(item))
-            menu.tk_popup(event.x_root, event.y_root)
+
+        menu.tk_popup(event.x_root, event.y_root)
 
     def _delete_row(self, item):
-        idx = self.tree.index(item)
-        self.captures.pop(idx)
+        gi, pi = self._find_point(item)
+        if gi is None:
+            return
+        self.groups[gi]["points"].pop(pi)
         self.tree.delete(item)
+        # If group is now empty, remove it
+        if not self.groups[gi]["points"]:
+            self.tree.delete(self.groups[gi]["tree_id"])
+            self.groups.pop(gi)
+        self._set_go_command("")
+
+    def _delete_group(self, item):
+        for gi, g in enumerate(self.groups):
+            if g["tree_id"] == item:
+                n = len(g["points"])
+                if messagebox.askyesno(
+                        "Delete zone",
+                        f"Delete this {g['shape']} zone ({n} point(s))?"):
+                    self.tree.delete(item)
+                    self.groups.pop(gi)
+                    self._set_go_command("")
+                return
+
+    def _change_group_shape(self, item, new_shape):
+        for gi, g in enumerate(self.groups):
+            if g["tree_id"] != item:
+                continue
+            old_shape = g["shape"]
+            if new_shape == old_shape:
+                return
+            n_have = len(g["points"])
+            n_need = SHAPE_POINTS.get(new_shape)
+
+            if n_need is not None and n_have > n_need:
+                ans = messagebox.askyesnocancel(
+                    "Too many points",
+                    f"'{new_shape}' needs {n_need} point(s) but you have {n_have}.\n\n"
+                    f"Yes  — keep first {n_need}, delete the rest\n"
+                    f"No   — delete this zone and start again\n"
+                    f"Cancel — keep current shape")
+                if ans is None:
+                    return
+                if ans:
+                    # Keep first n_need, delete the rest from tree + data
+                    for child in list(self.tree.get_children(item))[n_need:]:
+                        self.tree.delete(child)
+                    g["points"] = g["points"][:n_need]
+                else:
+                    self.tree.delete(item)
+                    self.groups.pop(gi)
+                    self._set_go_command("")
+                    return
+
+            g["shape"] = new_shape
+            self.tree.item(item, text=f"▾  {new_shape.title()}")
+            return
 
     # ── save / append ─────────────────────────────────────────────────────────
     def _save(self):
-        if not self.captures:
+        if not any(g["points"] for g in self.groups):
             messagebox.showinfo("Nothing to save", "No points captured yet.")
             return
 
         path  = self.file_entry.get().strip()
-        shape = self.shape.get()
-
-        # Build the block to append
-        lines = [f"\n### Captured Zone ({shape})\n",
-                 f"| Point | X | Y | Z |\n",
-                 f"|-------|---------|---------|-------|\n"]
-        for label, x, y, z, o in self.captures:
-            lines.append(f"| {label} | {x:.2f} | {y:.2f} | {z:.2f} |\n")
+        lines = []
+        for g in self.groups:
+            if not g["points"]:
+                continue
+            lines.append(f"\n### Captured Zone ({g['shape']})\n")
+            lines.append("| Point | X | Y | Z |\n")
+            lines.append("|-------|---------|---------|-------|\n")
+            for label, x, y, z, o in g["points"]:
+                lines.append(f"| {label} | {x:.2f} | {y:.2f} | {z:.2f} |\n")
 
         try:
             mode = "a" if os.path.exists(path) else "w"
@@ -945,10 +1087,11 @@ class App(tk.Tk):
         threading.Thread(target=_do_launch, daemon=True).start()
 
     def destroy(self):
-        if self.captures:
+        total_pts = sum(len(g["points"]) for g in self.groups)
+        if total_pts:
             choice = messagebox.askyesnocancel(
                 "Save before exit",
-                f"You have {len(self.captures)} captured point(s).\n"
+                f"You have {total_pts} captured point(s) across {len(self.groups)} zone(s).\n"
                 "Save to output file before closing?")
             if choice is None:       # Cancel — don't close
                 return
@@ -964,3 +1107,4 @@ class App(tk.Tk):
 if __name__ == "__main__":
     app = App()
     app.mainloop()
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
