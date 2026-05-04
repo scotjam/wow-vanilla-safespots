@@ -228,3 +228,14 @@ Series of points tracing the approach path to the conditional safe zone (ZF-13).
 ## Dire Maul East (Map 429)
 
 *To be mapped.*
+
+### Captured Zone (rectangle)
+| Point | X | Y | Z |
+|-------|---------|---------|-------|
+| point 1 | 1720.69 | 898.39 | 12.75 |
+| point 2 | 1719.64 | 901.05 | 12.76 |
+
+### Captured Zone (rectangle)
+| Point | X | Y | Z | Teleport command |
+|-------|---------|---------|-------|------------------|
+| point 1 | 1722.23 | 902.38 | 11.81 | `.go 1722.23 902.38 11.81 209` |
